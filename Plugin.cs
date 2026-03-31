@@ -1,7 +1,7 @@
 using System;
 using System.IO;
-using System.Text;
 using BepInEx;
+using BepInEx.Configuration;
 using UnityEngine;
 
 namespace SimpleAfterimage
@@ -15,44 +15,110 @@ namespace SimpleAfterimage
         public const string PluginName = "SimpleAfterimage";
         public const string Version = "0.1.0";
 
-        // 設定
-        private int _slotCount = 30;        // 残像枚数
-        private int _fadeFrames = 30;       // 何フレームで消えるか
-        private string _captureLayer = "Chara";
+        // Config
+        private ConfigEntry<bool>   _cfgEnabled;
+        private ConfigEntry<bool>   _cfgVerboseLog;
+        private ConfigEntry<int>    _cfgFadeFrames;
+        private ConfigEntry<int>    _cfgMaxSlots;
+        private ConfigEntry<int>    _cfgCaptureInterval;
+        private ConfigEntry<bool>   _cfgUseScreenSize;
+        private ConfigEntry<int>    _cfgCaptureWidth;
+        private ConfigEntry<int>    _cfgCaptureHeight;
+        private ConfigEntry<string> _cfgCharaLayer;
+        private ConfigEntry<float>  _cfgTintR;
+        private ConfigEntry<float>  _cfgTintG;
+        private ConfigEntry<float>  _cfgTintB;
+        private ConfigEntry<float>  _cfgTintA;
+        private ConfigEntry<float>  _cfgAlphaScale;
+        private ConfigEntry<bool>   _cfgPreferCameraMain;
+        private ConfigEntry<string> _cfgCameraNameFilter;
+        private ConfigEntry<int>    _cfgCameraFallbackIndex;
 
-        // キャプチャ用カメラ
+        // Runtime
         private Camera _captureCamera;
         private GameObject _cameraRoot;
-
-        // スロット: インデックス0が最新、末尾が最古
         private RenderTexture[] _slots;
-        private int[] _life;        // 残りフレーム数
-        private int _writeIndex;    // 次に書き込むスロット
+        private int[] _life;
+        private int _writeIndex;
+        private int _frameCounter;
         private int _characterMask;
+        private int _rtWidth;
+        private int _rtHeight;
 
-        // OnGUI描画用に毎フレーム更新
+        // OnGUI用
         private RenderTexture[] _drawSlots;
         private float[] _drawAlpha;
         private int _drawCount;
 
         private void Awake()
         {
-            string dir = Path.GetDirectoryName(Info.Location) ?? Paths.PluginPath;
-            Logger.LogInfo($"{PluginName} {Version} loaded. dir={dir}");
+            SetupConfig();
+            ApplyConfig();
+            Logger.LogInfo($"{PluginName} {Version} loaded.");
+        }
 
-            _slots = new RenderTexture[_slotCount];
-            _life = new int[_slotCount];
-            _drawSlots = new RenderTexture[_slotCount];
-            _drawAlpha = new float[_slotCount];
+        private void SetupConfig()
+        {
+            const string cat1 = "01.一般";
+            const string cat2 = "02.キャプチャ";
+            const string cat3 = "03.オーバーレイ";
+            const string cat4 = "04.元カメラ";
 
-            for (int i = 0; i < _slotCount; i++)
+            _cfgEnabled         = Config.Bind(cat1, "有効",           true,  "機能の有効/無効");
+            _cfgVerboseLog      = Config.Bind(cat1, "詳細ログ",       false, "詳細ログを出力する");
+            _cfgFadeFrames      = Config.Bind(cat2, "残像寿命フレーム", 30,   new ConfigDescription("残像が消えるまでのフレーム数", new AcceptableValueRange<int>(1, 300)));
+            _cfgMaxSlots        = Config.Bind(cat2, "同時残像数",      30,   new ConfigDescription("同時に保持する残像スロット数", new AcceptableValueRange<int>(1, 300)));
+            _cfgCaptureInterval = Config.Bind(cat2, "キャプチャ間隔",  1,    new ConfigDescription("何フレームごとにキャプチャするか(1=毎フレーム)", new AcceptableValueRange<int>(1, 60)));
+            _cfgUseScreenSize   = Config.Bind(cat2, "画面解像度を使う", true, "キャプチャサイズに画面解像度を使う");
+            _cfgCaptureWidth    = Config.Bind(cat2, "キャプチャ幅",    0,    new ConfigDescription("UseScreenSize=false時のキャプチャ幅", new AcceptableValueRange<int>(0, 8192)));
+            _cfgCaptureHeight   = Config.Bind(cat2, "キャプチャ高さ",  0,    new ConfigDescription("UseScreenSize=false時のキャプチャ高さ", new AcceptableValueRange<int>(0, 8192)));
+            _cfgCharaLayer      = Config.Bind(cat2, "キャラレイヤー名", "Chara", "キャプチャ対象のレイヤー名");
+            _cfgTintR           = Config.Bind(cat3, "色R",            1f,   new ConfigDescription("残像色 R (0..1)", new AcceptableValueRange<float>(0f, 1f)));
+            _cfgTintG           = Config.Bind(cat3, "色G",            1f,   new ConfigDescription("残像色 G (0..1)", new AcceptableValueRange<float>(0f, 1f)));
+            _cfgTintB           = Config.Bind(cat3, "色B",            1f,   new ConfigDescription("残像色 B (0..1)", new AcceptableValueRange<float>(0f, 1f)));
+            _cfgTintA           = Config.Bind(cat3, "色A",            1f,   new ConfigDescription("残像色 A (0..1)", new AcceptableValueRange<float>(0f, 1f)));
+            _cfgAlphaScale      = Config.Bind(cat3, "残像アルファ倍率", 1f,  new ConfigDescription("残像の全体濃度スケール(0..1)", new AcceptableValueRange<float>(0f, 1f)));
+            _cfgPreferCameraMain    = Config.Bind(cat4, "Camera.main優先", true, "Camera.mainを優先する");
+            _cfgCameraNameFilter    = Config.Bind(cat4, "カメラ名フィルタ", "", "カメラ名の部分一致フィルタ(空なら無効)");
+            _cfgCameraFallbackIndex = Config.Bind(cat4, "カメラ候補フォールバック", 0, new ConfigDescription("候補カメラのフォールバックインデックス", new AcceptableValueRange<int>(0, 64)));
+
+            Config.SettingChanged += (_, _) => ApplyConfig();
+        }
+
+        private void ApplyConfig()
+        {
+            _characterMask = LayerMask.GetMask(_cfgCharaLayer.Value ?? "Chara");
+
+            int newSlots = Mathf.Clamp(_cfgMaxSlots.Value, 1, 300);
+            int newW = _cfgUseScreenSize.Value || _cfgCaptureWidth.Value <= 0 ? Screen.width  : _cfgCaptureWidth.Value;
+            int newH = _cfgUseScreenSize.Value || _cfgCaptureHeight.Value <= 0 ? Screen.height : _cfgCaptureHeight.Value;
+            newW = Mathf.Max(16, newW);
+            newH = Mathf.Max(16, newH);
+
+            bool needRebuild = _slots == null
+                || _slots.Length != newSlots
+                || _rtWidth != newW
+                || _rtHeight != newH;
+
+            if (needRebuild)
             {
-                _slots[i] = CreateRT();
-                _life[i] = 0;
+                ReleaseSlots();
+                _slots = new RenderTexture[newSlots];
+                _life  = new int[newSlots];
+                _drawSlots = new RenderTexture[newSlots];
+                _drawAlpha = new float[newSlots];
+                for (int i = 0; i < newSlots; i++)
+                    _slots[i] = CreateRT(newW, newH);
+                _rtWidth  = newW;
+                _rtHeight = newH;
+                _writeIndex = 0;
+                _frameCounter = 0;
+                if (_cfgVerboseLog.Value)
+                    Logger.LogInfo($"slots rebuilt: {newW}x{newH} slots={newSlots}");
             }
 
-            _characterMask = LayerMask.GetMask(_captureLayer);
-            SetupCaptureCamera();
+            if (_cameraRoot == null)
+                SetupCaptureCamera();
         }
 
         private void SetupCaptureCamera()
@@ -63,9 +129,9 @@ namespace SimpleAfterimage
             _captureCamera.enabled = false;
         }
 
-        private RenderTexture CreateRT()
+        private RenderTexture CreateRT(int w, int h)
         {
-            var rt = new RenderTexture(Screen.width, Screen.height, 24, RenderTextureFormat.ARGB32)
+            var rt = new RenderTexture(w, h, 24, RenderTextureFormat.ARGB32)
             {
                 wrapMode = TextureWrapMode.Clamp,
                 filterMode = FilterMode.Bilinear
@@ -74,12 +140,75 @@ namespace SimpleAfterimage
             return rt;
         }
 
+        private void ReleaseSlots()
+        {
+            if (_slots == null) return;
+            for (int i = 0; i < _slots.Length; i++)
+            {
+                if (_slots[i] != null)
+                {
+                    _slots[i].Release();
+                    Destroy(_slots[i]);
+                    _slots[i] = null;
+                }
+            }
+        }
+
+        private Camera ResolveCamera()
+        {
+            string filter = _cfgCameraNameFilter.Value ?? "";
+            bool hasFilter = filter.Length > 0;
+
+            if (_cfgPreferCameraMain.Value && Camera.main != null && Camera.main.enabled)
+            {
+                if (!hasFilter || Camera.main.name.IndexOf(filter, StringComparison.OrdinalIgnoreCase) >= 0)
+                    return Camera.main;
+            }
+
+            Camera[] all = Camera.allCameras;
+            if (all == null || all.Length == 0) return null;
+
+            var candidates = new System.Collections.Generic.List<Camera>(all.Length);
+            foreach (Camera c in all)
+            {
+                if (c == null || !c.enabled || !c.gameObject.activeInHierarchy) continue;
+                if (c == _captureCamera) continue;
+                candidates.Add(c);
+            }
+            if (candidates.Count == 0) return null;
+            candidates.Sort((a, b) => b.depth.CompareTo(a.depth));
+
+            if (hasFilter)
+            {
+                foreach (Camera c in candidates)
+                    if (c.name.IndexOf(filter, StringComparison.OrdinalIgnoreCase) >= 0)
+                        return c;
+            }
+
+            int idx = Mathf.Clamp(_cfgCameraFallbackIndex.Value, 0, candidates.Count - 1);
+            return candidates[idx];
+        }
+
         private void LateUpdate()
         {
-            Camera src = Camera.main;
-            if (src == null) return;
+            if (!_cfgEnabled.Value || _slots == null) return;
 
-            // キャプチャカメラをメインカメラに同期
+            _frameCounter++;
+            int interval = Mathf.Max(1, _cfgCaptureInterval.Value);
+            if (interval > 1 && (_frameCounter % interval) != 0)
+            {
+                // キャプチャしないフレームでもライフは減らす
+                AgeThenBuildDrawList();
+                return;
+            }
+
+            Camera src = ResolveCamera();
+            if (src == null)
+            {
+                AgeThenBuildDrawList();
+                return;
+            }
+
             _captureCamera.CopyFrom(src);
             _captureCamera.cullingMask = _characterMask;
             _captureCamera.clearFlags = CameraClearFlags.SolidColor;
@@ -88,48 +217,57 @@ namespace SimpleAfterimage
             _captureCamera.Render();
             _captureCamera.targetTexture = null;
 
-            _life[_writeIndex] = _fadeFrames;
-            _writeIndex = (_writeIndex + 1) % _slotCount;
+            _life[_writeIndex] = Mathf.Max(1, _cfgFadeFrames.Value);
+            _writeIndex = (_writeIndex + 1) % _slots.Length;
 
-            // ライフを1減らす（最新スロットは除く）
-            for (int i = 0; i < _slotCount; i++)
-            {
-                if (_life[i] > 0)
-                    _life[i]--;
-            }
+            AgeThenBuildDrawList();
+        }
 
-            // OnGUI用に描画リストを作成
-            // 最新→最古の順でリストアップ（描画は逆順＝最新を先に＝奥に）
+        private void AgeThenBuildDrawList()
+        {
+            int fadeFrames = Mathf.Max(1, _cfgFadeFrames.Value);
+            float alphaScale = Mathf.Clamp01(_cfgAlphaScale.Value);
+            float tintA = Mathf.Clamp01(_cfgTintA.Value);
+
+            // ライフを減らす
+            for (int i = 0; i < _slots.Length; i++)
+                if (_life[i] > 0) _life[i]--;
+
+            // 描画リスト作成: 最新→最古の順（描画は最新が先＝奥、最古が後＝手前）
             _drawCount = 0;
-            int idx = (_writeIndex - 1 + _slotCount) % _slotCount; // 直前に書いたスロット
-            for (int i = 0; i < _slotCount; i++)
+            int newest = (_writeIndex - 1 + _slots.Length) % _slots.Length;
+            for (int i = 0; i < _slots.Length; i++)
             {
-                int slot = (idx - i + _slotCount) % _slotCount;
-                if (_life[slot] > 0)
-                {
-                    _drawSlots[_drawCount] = _slots[slot];
-                    // 線形フェード: 新しいほど alpha=1、古いほど alpha→0
-                    float t = (float)_life[slot] / _fadeFrames; // 1=新しい, 0=古い
-                    _drawAlpha[_drawCount] = t;
-                    _drawCount++;
-                }
+                int slot = (newest - i + _slots.Length) % _slots.Length;
+                if (_life[slot] <= 0) continue;
+
+                float t = (float)_life[slot] / fadeFrames; // 1=新しい, 0=古い
+                float alpha = tintA * alphaScale * t;
+                if (alpha <= 0.0001f) continue;
+
+                _drawSlots[_drawCount] = _slots[slot];
+                _drawAlpha[_drawCount] = alpha;
+                _drawCount++;
             }
         }
 
         private void OnGUI()
         {
-            if (_drawCount == 0) return;
+            if (!_cfgEnabled.Value || _drawCount == 0) return;
 
-            // 最新(index=0)が奥、最古(index=_drawCount-1)が手前
-            // 後から描くほど上に来るので、最古を最後に描く
-            // つまり index=0(最新)から順に描く
+            float r = Mathf.Clamp01(_cfgTintR.Value);
+            float g = Mathf.Clamp01(_cfgTintG.Value);
+            float b = Mathf.Clamp01(_cfgTintB.Value);
+            Rect rect = new Rect(0, 0, Screen.width, Screen.height);
+
+            // index=0(最新)から描く → 奥に重なる
+            // index=_drawCount-1(最古)を最後に描く → 手前に重なる
             for (int i = 0; i < _drawCount; i++)
             {
                 if (_drawSlots[i] == null) continue;
                 float alpha = _drawAlpha[i];
-                if (alpha <= 0.0001f) continue;
-                GUI.color = new Color(1f, 1f, 1f, alpha);
-                GUI.DrawTexture(new Rect(0, 0, Screen.width, Screen.height), _drawSlots[i]);
+                GUI.color = new Color(r, g, b, alpha);
+                GUI.DrawTexture(rect, _drawSlots[i]);
             }
 
             GUI.color = Color.white;
@@ -137,20 +275,8 @@ namespace SimpleAfterimage
 
         private void OnDestroy()
         {
-            if (_cameraRoot != null)
-                Destroy(_cameraRoot);
-
-            if (_slots != null)
-            {
-                for (int i = 0; i < _slots.Length; i++)
-                {
-                    if (_slots[i] != null)
-                    {
-                        _slots[i].Release();
-                        Destroy(_slots[i]);
-                    }
-                }
-            }
+            if (_cameraRoot != null) Destroy(_cameraRoot);
+            ReleaseSlots();
         }
     }
 }
