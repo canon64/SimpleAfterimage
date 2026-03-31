@@ -1,4 +1,5 @@
 using System;
+using System.Collections;
 using BepInEx;
 using BepInEx.Configuration;
 using UnityEngine;
@@ -36,6 +37,7 @@ namespace SimpleAfterimage
         private ConfigEntry<float>  _cfgTintB;
         private ConfigEntry<float>  _cfgTintA;
         private ConfigEntry<float>  _cfgAlphaScale;
+        private ConfigEntry<string> _cfgFadeCurve;
         private ConfigEntry<bool>   _cfgFrontOfCharacter;  // true=前面(OnGUI), false=背面(OnPostRender)
         private ConfigEntry<bool>   _cfgPreferCameraMain;
         private ConfigEntry<string> _cfgCameraNameFilter;
@@ -87,6 +89,7 @@ namespace SimpleAfterimage
             _cfgTintB           = Config.Bind(cat3, "色B",             1f,    new ConfigDescription("残像色 B (0..1)", new AcceptableValueRange<float>(0f, 1f)));
             _cfgTintA           = Config.Bind(cat3, "色A",             1f,    new ConfigDescription("残像色 A (0..1)", new AcceptableValueRange<float>(0f, 1f)));
             _cfgAlphaScale      = Config.Bind(cat3, "残像アルファ倍率", 1f,   new ConfigDescription("残像の全体濃度スケール(0..1)", new AcceptableValueRange<float>(0f, 1f)));
+            _cfgFadeCurve       = Config.Bind(cat3, "フェードカーブ",   "Linear", new ConfigDescription("Linear=線形 / EaseIn=最初ゆっくり後半急 / EaseOut=最初急後半ゆっくり / Square=二乗", new AcceptableValueList<string>("Linear", "EaseIn", "EaseOut", "Square")));
             _cfgFrontOfCharacter = Config.Bind(cat3, "キャラ前面に表示", true, "true=キャラの前面(OnGUI) / false=キャラの背面(OnPostRender)");
             _cfgPreferCameraMain    = Config.Bind(cat4, "Camera.main優先",       true, "Camera.mainを優先する");
             _cfgCameraNameFilter    = Config.Bind(cat4, "カメラ名フィルタ",       "",   "カメラ名の部分一致フィルタ(空なら無効)");
@@ -228,14 +231,17 @@ namespace SimpleAfterimage
 
             _frameCounter++;
             int interval = Mathf.Max(1, _cfgCaptureInterval.Value);
-            if (interval > 1 && (_frameCounter % interval) != 0)
-            {
-                AgeThenBuildDrawList();
-                return;
-            }
+            bool shouldCapture = src != null && (interval <= 1 || (_frameCounter % interval) == 0);
+            if (shouldCapture)
+                StartCoroutine(CaptureEndOfFrame(src));
 
-            if (src == null) { AgeThenBuildDrawList(); return; }
+            AgeThenBuildDrawList();
+        }
 
+        private IEnumerator CaptureEndOfFrame(Camera src)
+        {
+            yield return new WaitForEndOfFrame();
+            if (!_cfgEnabled.Value || _slots == null || src == null) yield break;
             _captureCamera.CopyFrom(src);
             _captureCamera.cullingMask = _characterMask;
             _captureCamera.clearFlags = CameraClearFlags.SolidColor;
@@ -243,11 +249,8 @@ namespace SimpleAfterimage
             _captureCamera.targetTexture = _slots[_writeIndex];
             _captureCamera.Render();
             _captureCamera.targetTexture = null;
-
             _life[_writeIndex] = Mathf.Max(1, _cfgFadeFrames.Value);
             _writeIndex = (_writeIndex + 1) % _slots.Length;
-
-            AgeThenBuildDrawList();
         }
 
         private void AgeThenBuildDrawList()
@@ -267,12 +270,24 @@ namespace SimpleAfterimage
                 if (_life[slot] <= 0) continue;
 
                 float t = (float)_life[slot] / fadeFrames; // 1=新しい, 0=古い
+                t = ApplyCurve(t, _cfgFadeCurve.Value);
                 float alpha = tintA * alphaScale * t;
                 if (alpha <= 0.0001f) continue;
 
                 _drawSlots[_drawCount] = _slots[slot];
                 _drawAlpha[_drawCount] = alpha;
                 _drawCount++;
+            }
+        }
+
+        private static float ApplyCurve(float t, string curve)
+        {
+            switch (curve)
+            {
+                case "EaseIn":  return t * t;
+                case "EaseOut": return Mathf.Sqrt(t);
+                case "Square":  return t * t * t;
+                default:        return t; // Linear
             }
         }
 
