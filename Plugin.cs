@@ -68,6 +68,7 @@ namespace SimpleAfterimage
         private HSceneProc _hSceneProc;
         private float _nextHSceneScanTime;
         private int _effectiveFadeFrames;
+        private bool _suppressSettingChanged;
 
         private void Awake()
         {
@@ -108,7 +109,7 @@ namespace SimpleAfterimage
             _cfgSpeedSyncFadeMin = Config.Bind(cat5, "速さ最小時FadeFrames",   5,     new ConfigDescription("速さ0の時の残像寿命フレーム", new AcceptableValueRange<int>(1, 300)));
             _cfgSpeedSyncFadeMax = Config.Bind(cat5, "速さ最大時FadeFrames",   30,    new ConfigDescription("速さ最大の時の残像寿命フレーム", new AcceptableValueRange<int>(1, 300)));
 
-            Config.SettingChanged += (_, _) => ApplyConfig();
+            Config.SettingChanged += (_, _) => { if (!_suppressSettingChanged) ApplyConfig(); };
         }
 
         private void ApplyConfig()
@@ -258,9 +259,16 @@ namespace SimpleAfterimage
             {
                 float intensity = GetHSceneSpeedIntensity();
                 if (intensity >= 0f)
-                    _effectiveFadeFrames = Mathf.Clamp(Mathf.RoundToInt(Mathf.Lerp(_cfgSpeedSyncFadeMin.Value, _cfgSpeedSyncFadeMax.Value, intensity)), 1, 300);
-                else
-                    _effectiveFadeFrames = Mathf.Max(1, _cfgFadeFrames.Value);
+                {
+                    int synced = Mathf.Clamp(Mathf.RoundToInt(Mathf.Lerp(_cfgSpeedSyncFadeMin.Value, _cfgSpeedSyncFadeMax.Value, intensity)), 1, 300);
+                    if (_cfgFadeFrames.Value != synced)
+                    {
+                        _suppressSettingChanged = true;
+                        _cfgFadeFrames.Value = synced;
+                        _suppressSettingChanged = false;
+                    }
+                }
+                _effectiveFadeFrames = Mathf.Max(1, _cfgFadeFrames.Value);
             }
             else
             {
