@@ -14,11 +14,11 @@ namespace SimpleAfterimage
         public const string PluginName = "SimpleAfterimage";
         public const string Version = "0.1.0";
 
-        // キャラ背面描画用 MonoBehaviour
-        private sealed class BehindDrawer : MonoBehaviour
+        // 描画用 MonoBehaviour（前面・背面共用）
+        private sealed class OverlayDrawer : MonoBehaviour
         {
             internal Plugin Owner;
-            private void OnPostRender() { Owner?.DrawBehind(); }
+            private void OnPostRender() { Owner?.DrawOnPostRender(); }
         }
 
         // Config
@@ -44,7 +44,7 @@ namespace SimpleAfterimage
         // Runtime
         private Camera _captureCamera;
         private Camera _lastSourceCamera;
-        private BehindDrawer _behindDrawer;
+        private OverlayDrawer _overlayDrawer;
         private GameObject _cameraRoot;
         private RenderTexture[] _slots;
         private int[] _life;
@@ -199,14 +199,12 @@ namespace SimpleAfterimage
             return candidates[idx];
         }
 
-        // 背面モード: BehindDrawer をソースカメラにアタッチ/解除
-        private void SyncBehindDrawer(Camera srcCamera)
+        // OverlayDrawer をソースカメラにアタッチ/解除
+        private void SyncOverlayDrawer(Camera srcCamera)
         {
-            bool needBehind = _cfgEnabled.Value && !_cfgFrontOfCharacter.Value && srcCamera != null;
-
-            if (!needBehind)
+            if (!_cfgEnabled.Value || srcCamera == null)
             {
-                if (_behindDrawer != null) { Destroy(_behindDrawer); _behindDrawer = null; }
+                if (_overlayDrawer != null) { Destroy(_overlayDrawer); _overlayDrawer = null; }
                 _lastSourceCamera = null;
                 return;
             }
@@ -214,9 +212,9 @@ namespace SimpleAfterimage
             // ソースカメラが変わったら付け直す
             if (_lastSourceCamera != srcCamera)
             {
-                if (_behindDrawer != null) { Destroy(_behindDrawer); _behindDrawer = null; }
-                _behindDrawer = srcCamera.gameObject.AddComponent<BehindDrawer>();
-                _behindDrawer.Owner = this;
+                if (_overlayDrawer != null) { Destroy(_overlayDrawer); _overlayDrawer = null; }
+                _overlayDrawer = srcCamera.gameObject.AddComponent<OverlayDrawer>();
+                _overlayDrawer.Owner = this;
                 _lastSourceCamera = srcCamera;
             }
         }
@@ -226,7 +224,7 @@ namespace SimpleAfterimage
             if (!_cfgEnabled.Value || _slots == null) return;
 
             Camera src = ResolveCamera();
-            SyncBehindDrawer(src);
+            SyncOverlayDrawer(src);
 
             _frameCounter++;
             int interval = Mathf.Max(1, _cfgCaptureInterval.Value);
@@ -278,37 +276,12 @@ namespace SimpleAfterimage
             }
         }
 
-        private void DrawSlots()
+        // OverlayDrawer の OnPostRender から呼ばれる
+        // キャラ前面(true): ソースカメラのOnPostRender → GUIフェーズに乗ってキャラ前面
+        // キャラ背面(false): 同じくOnPostRenderだがGUIフェーズに乗らずキャラ背面
+        internal void DrawOnPostRender()
         {
-            if (_drawCount == 0) return;
-            float r = Mathf.Clamp01(_cfgTintR.Value);
-            float g = Mathf.Clamp01(_cfgTintG.Value);
-            float b = Mathf.Clamp01(_cfgTintB.Value);
-            Rect rect = new Rect(0, 0, Screen.width, Screen.height);
-
-            // 最新(index=0)が先＝奥、最古(index=_drawCount-1)が後＝手前
-            for (int i = 0; i < _drawCount; i++)
-            {
-                if (_drawSlots[i] == null) continue;
-                float alpha = _drawAlpha[i];
-                if (alpha <= 0.0001f) continue;
-                GUI.color = new Color(r, g, b, alpha);
-                GUI.DrawTexture(rect, _drawSlots[i]);
-            }
-            GUI.color = Color.white;
-        }
-
-        // 前面モード: OnGUIで描画（全カメラ描画後 → キャラより前面）
-        private void OnGUI()
-        {
-            if (!_cfgEnabled.Value || !_cfgFrontOfCharacter.Value) return;
-            DrawSlots();
-        }
-
-        // 背面モード: BehindDrawer の OnPostRender から呼ばれる
-        internal void DrawBehind()
-        {
-            if (!_cfgEnabled.Value || _cfgFrontOfCharacter.Value || _drawCount == 0) return;
+            if (!_cfgEnabled.Value || _drawCount == 0) return;
             float r = Mathf.Clamp01(_cfgTintR.Value);
             float g = Mathf.Clamp01(_cfgTintG.Value);
             float b = Mathf.Clamp01(_cfgTintB.Value);
@@ -318,6 +291,7 @@ namespace SimpleAfterimage
             GL.LoadPixelMatrix(0f, Screen.width, Screen.height, 0f);
             try
             {
+                // 最新(index=0)が先＝奥、最古(index=_drawCount-1)が後＝手前
                 for (int i = 0; i < _drawCount; i++)
                 {
                     if (_drawSlots[i] == null) continue;
@@ -335,7 +309,7 @@ namespace SimpleAfterimage
 
         private void OnDestroy()
         {
-            if (_behindDrawer != null) Destroy(_behindDrawer);
+            if (_overlayDrawer != null) Destroy(_overlayDrawer);
             if (_cameraRoot != null) Destroy(_cameraRoot);
             ReleaseSlots();
         }
