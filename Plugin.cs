@@ -103,6 +103,7 @@ namespace SimpleAfterimage
             _configJsonPath = Path.Combine(pluginDir, "config.json");
             LoadPresetsFile();
             SetupConfig();
+            LoadConfigJson();
             ApplyConfig();
             SaveConfigJson();
             Logger.LogInfo($"{PluginName} {Version} loaded.");
@@ -283,6 +284,142 @@ namespace SimpleAfterimage
             _cfgFadeFrames.Value = Mathf.Clamp(p.FadeFrames, 1, 300);
             return true;
         }
+
+        private void LoadConfigJson()
+        {
+            if (string.IsNullOrEmpty(_configJsonPath) || !File.Exists(_configJsonPath))
+                return;
+
+            try
+            {
+                string json = File.ReadAllText(_configJsonPath, Encoding.UTF8).Trim();
+                if (!json.StartsWith("{") || !json.EndsWith("}")) return;
+
+                json = json.Substring(1, json.Length - 2).Trim();
+                int pos = 0;
+
+                while (pos < json.Length)
+                {
+                    string key = ReadJsonString(json, ref pos);
+                    if (key == null) break;
+
+                    SkipColon(json, ref pos);
+                    SkipWs(json, ref pos);
+
+                    if (pos >= json.Length) break;
+
+                    string val;
+                    if (json[pos] == '"')
+                    {
+                        val = ReadJsonString(json, ref pos);
+                    }
+                    else
+                    {
+                        int end = pos;
+                        while (end < json.Length && json[end] != ',' && json[end] != '}') end++;
+                        val = json.Substring(pos, end - pos).Trim();
+                        pos = end;
+                    }
+
+                    ApplyConfigJsonValue(key, val);
+                    SkipComma(json, ref pos);
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.LogWarning("config json load failed: " + ex.Message);
+            }
+        }
+
+        private void ApplyConfigJsonValue(string key, string val)
+        {
+            switch (key)
+            {
+                case "Enabled":
+                    _cfgEnabled.Value = val == "true";
+                    break;
+                case "VerboseLog":
+                    _cfgVerboseLog.Value = val == "true";
+                    break;
+                case "FadeFrames":
+                    if (int.TryParse(val, out int fadeFrames))
+                        _cfgFadeFrames.Value = Mathf.Clamp(fadeFrames, 1, 300);
+                    break;
+                case "MaxSlots":
+                    if (int.TryParse(val, out int maxSlots))
+                        _cfgMaxSlots.Value = Mathf.Clamp(maxSlots, 1, 300);
+                    break;
+                case "CaptureInterval":
+                    if (int.TryParse(val, out int captureInterval))
+                        _cfgCaptureInterval.Value = Mathf.Clamp(captureInterval, 1, 60);
+                    break;
+                case "UseScreenSize":
+                    _cfgUseScreenSize.Value = val == "true";
+                    break;
+                case "CaptureWidth":
+                    if (int.TryParse(val, out int captureWidth))
+                        _cfgCaptureWidth.Value = Mathf.Max(16, captureWidth);
+                    break;
+                case "CaptureHeight":
+                    if (int.TryParse(val, out int captureHeight))
+                        _cfgCaptureHeight.Value = Mathf.Max(16, captureHeight);
+                    break;
+                case "CharaLayer":
+                    _cfgCharaLayer.Value = val ?? "Chara";
+                    break;
+                case "TintR":
+                    if (float.TryParse(val, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out float tintR))
+                        _cfgTintR.Value = Mathf.Clamp01(tintR);
+                    break;
+                case "TintG":
+                    if (float.TryParse(val, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out float tintG))
+                        _cfgTintG.Value = Mathf.Clamp01(tintG);
+                    break;
+                case "TintB":
+                    if (float.TryParse(val, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out float tintB))
+                        _cfgTintB.Value = Mathf.Clamp01(tintB);
+                    break;
+                case "TintA":
+                    if (float.TryParse(val, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out float tintA))
+                        _cfgTintA.Value = Mathf.Clamp01(tintA);
+                    break;
+                case "AlphaScale":
+                    if (float.TryParse(val, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out float alphaScale))
+                        _cfgAlphaScale.Value = Mathf.Clamp01(alphaScale);
+                    break;
+                case "FadeCurve":
+                    _cfgFadeCurve.Value = val ?? "Linear";
+                    break;
+                case "FrontOfCharacter":
+                    _cfgFrontOfCharacter.Value = val == "true";
+                    break;
+                case "PreferCameraMain":
+                    _cfgPreferCameraMain.Value = val == "true";
+                    break;
+                case "CameraNameFilter":
+                    _cfgCameraNameFilter.Value = val ?? "";
+                    break;
+                case "CameraFallbackIndex":
+                    if (int.TryParse(val, out int fallbackIndex))
+                        _cfgCameraFallbackIndex.Value = Mathf.Max(0, fallbackIndex);
+                    break;
+                case "PresetName":
+                    _cfgPresetName.Value = val ?? "default";
+                    break;
+                case "BeatSyncFadeEnabled":
+                    _cfgBeatSyncFadeEnabled.Value = val == "true";
+                    break;
+                case "BeatSyncFadeMin":
+                    if (int.TryParse(val, out int beatSyncMin))
+                        _cfgBeatSyncFadeMin.Value = Mathf.Clamp(beatSyncMin, 1, 300);
+                    break;
+                case "BeatSyncFadeMax":
+                    if (int.TryParse(val, out int beatSyncMax))
+                        _cfgBeatSyncFadeMax.Value = Mathf.Clamp(beatSyncMax, 1, 300);
+                    break;
+            }
+        }
+
 
         public string[] GetPresetNames()
         {
