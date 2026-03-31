@@ -42,6 +42,9 @@ namespace SimpleAfterimage
         private ConfigEntry<bool>   _cfgPreferCameraMain;
         private ConfigEntry<string> _cfgCameraNameFilter;
         private ConfigEntry<int>    _cfgCameraFallbackIndex;
+        private ConfigEntry<bool>   _cfgSpeedSyncEnabled;
+        private ConfigEntry<int>    _cfgSpeedSyncFadeMin;
+        private ConfigEntry<int>    _cfgSpeedSyncFadeMax;
 
         // Runtime
         private Camera _captureCamera;
@@ -60,6 +63,11 @@ namespace SimpleAfterimage
         private RenderTexture[] _drawSlots;
         private float[] _drawAlpha;
         private int _drawCount;
+
+        // 速さ同期
+        private HSceneProc _hSceneProc;
+        private float _nextHSceneScanTime;
+        private int _effectiveFadeFrames;
 
         private void Awake()
         {
@@ -94,6 +102,11 @@ namespace SimpleAfterimage
             _cfgPreferCameraMain    = Config.Bind(cat4, "Camera.main優先",       true, "Camera.mainを優先する");
             _cfgCameraNameFilter    = Config.Bind(cat4, "カメラ名フィルタ",       "",   "カメラ名の部分一致フィルタ(空なら無効)");
             _cfgCameraFallbackIndex = Config.Bind(cat4, "カメラ候補フォールバック", 0,  new ConfigDescription("候補カメラのフォールバックインデックス", new AcceptableValueRange<int>(0, 64)));
+
+            const string cat5 = "05.速さ同期";
+            _cfgSpeedSyncEnabled = Config.Bind(cat5, "速さ同期有効",           false, "HSceneの速さスライダーに残像寿命フレームを連動させる");
+            _cfgSpeedSyncFadeMin = Config.Bind(cat5, "速さ最小時FadeFrames",   5,     new ConfigDescription("速さ0の時の残像寿命フレーム", new AcceptableValueRange<int>(1, 300)));
+            _cfgSpeedSyncFadeMax = Config.Bind(cat5, "速さ最大時FadeFrames",   30,    new ConfigDescription("速さ最大の時の残像寿命フレーム", new AcceptableValueRange<int>(1, 300)));
 
             Config.SettingChanged += (_, _) => ApplyConfig();
         }
@@ -132,6 +145,8 @@ namespace SimpleAfterimage
 
             if (_cameraRoot == null)
                 SetupCaptureCamera();
+
+            _effectiveFadeFrames = Mathf.Max(1, _cfgFadeFrames.Value);
         }
 
         private void SetupCaptureCamera()
@@ -222,9 +237,35 @@ namespace SimpleAfterimage
             }
         }
 
+        private float GetHSceneSpeedIntensity()
+        {
+            if (Time.unscaledTime >= _nextHSceneScanTime)
+            {
+                _nextHSceneScanTime = Time.unscaledTime + 1f;
+                if (_hSceneProc == null || !_hSceneProc)
+                    _hSceneProc = FindObjectOfType<HSceneProc>();
+            }
+            if (_hSceneProc == null || _hSceneProc.flags == null) return -1f;
+            float maxSpeed = _hSceneProc.flags.speedMaxBody > 0f ? _hSceneProc.flags.speedMaxBody : 1f;
+            return Mathf.Clamp01(_hSceneProc.flags.speedCalc / maxSpeed);
+        }
+
         private void LateUpdate()
         {
             if (!_cfgEnabled.Value || _slots == null) return;
+
+            if (_cfgSpeedSyncEnabled.Value)
+            {
+                float intensity = GetHSceneSpeedIntensity();
+                if (intensity >= 0f)
+                    _effectiveFadeFrames = Mathf.Clamp(Mathf.RoundToInt(Mathf.Lerp(_cfgSpeedSyncFadeMin.Value, _cfgSpeedSyncFadeMax.Value, intensity)), 1, 300);
+                else
+                    _effectiveFadeFrames = Mathf.Max(1, _cfgFadeFrames.Value);
+            }
+            else
+            {
+                _effectiveFadeFrames = Mathf.Max(1, _cfgFadeFrames.Value);
+            }
 
             Camera src = ResolveCamera();
             SyncOverlayDrawer(src);
@@ -249,13 +290,13 @@ namespace SimpleAfterimage
             _captureCamera.targetTexture = _slots[_writeIndex];
             _captureCamera.Render();
             _captureCamera.targetTexture = null;
-            _life[_writeIndex] = Mathf.Max(1, _cfgFadeFrames.Value);
+            _life[_writeIndex] = _effectiveFadeFrames;
             _writeIndex = (_writeIndex + 1) % _slots.Length;
         }
 
         private void AgeThenBuildDrawList()
         {
-            int fadeFrames = Mathf.Max(1, _cfgFadeFrames.Value);
+            int fadeFrames = _effectiveFadeFrames;
             float alphaScale = Mathf.Clamp01(_cfgAlphaScale.Value);
             float tintA = Mathf.Clamp01(_cfgTintA.Value);
 
