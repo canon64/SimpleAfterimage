@@ -17,7 +17,6 @@ KoikatsuSunshine / KoikatsuSunshine_VR 用の BepInEx プラグインです。
 ## 動作環境
 
 - KoikatsuSunshine
-- KoikatsuSunshine_VR
 - BepInEx 5
 - .NET Framework 4.7.2
 
